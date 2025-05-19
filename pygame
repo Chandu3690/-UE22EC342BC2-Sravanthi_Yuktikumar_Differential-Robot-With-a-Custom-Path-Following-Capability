@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+
+import pygame
+import math
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist
+import threading
+import time
+
+class PathFollower(Node):
+    def _init_(self):
+        super()._init_('path_follower')
+        # Publisher for sending velocity commands
+        self.publisher_ = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.get_logger().info('Path Follower node initialized')
+
+    def publish_velocity(self, linear_x, angular_z):
+        twist = Twist()
+        twist.linear.x = float(linear_x)
+        twist.angular.z = float(angular_z)
+        self.publisher_.publish(twist)
+        self.get_logger().info(f'Publishing velocity: linear={linear_x}, angular={angular_z}')
+
+def main():
+    # Initialize ROS2 node
+    rclpy.init()
+    node = PathFollower()
+
+    # Run ROS2 in a separate thread
+    ros_thread = threading.Thread(target=lambda: rclpy.spin(node))
+    ros_thread.daemon = True
+    ros_thread.start()
+
+    # Initialize Pygame
+    pygame.init()
+    width, height = 800, 600
+    screen = pygame.display.set_mode((width, height))
+    pygame.display.set_caption("Path Follower")
+    clock = pygame.time.Clock()
+
+    # Colors
+    BLACK = (0, 0, 0)
+    WHITE = (255, 255, 255)
+    RED = (255, 0, 0)
+    BLUE = (0, 0, 255)
+    GREEN = (0, 255, 0)
+
+    # Path storage
+    path = []
+    drawing = False
+    following = False
+    current_target = 0
+    rect_pos = [400, 300]  # Starting position of the rectangle
+    rect_size = 20
+    follow_speed = 2  # Speed at which rectangle follows path
+
+    # Rectangle parameters for simulation
+    rect_angle = 0  # Current angle of the rectangle in radians
+
+    # Main game loop
+    running = True
+    while running:
+        screen.fill(WHITE)
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:  # Left mouse button
+                    # Reset path and start drawing
+                    path = []
+                    drawing = True
+                    following = False
+                    current_target = 0
+                    path.append(event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:  # Left mouse button
+                    drawing = False
+                    if len(path) > 1:
+                        following = True
+                        rect_pos = [path[0][0], path[0][1]]  # Reset rectangle to start of path
+            elif event.type == pygame.MOUSEMOTION:
+                if drawing:
+                    path.append(event.pos)
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_r:  # Reset path with 'r' key
+                    path = []
+                    following = False
+                    current_target = 0
+                    node.publish_velocity(0, 0)  # Stop the robot
+                elif event.key == pygame.K_ESCAPE:  # Quit with ESC key
+                    running = False
+
+        # Draw the path
+        if len(path) > 1:
+            pygame.draw.lines(screen, BLUE, False, path, 2)
+            for point in path:
+                pygame.draw.circle(screen, RED, point, 3)
+
+        # Follow the path
+        if following and len(path) > 1 and current_target < len(path):
+            target = path[current_target]
+            
+            # Calculate distance to target
+            dx = target[0] - rect_pos[0]
+            dy = target[1] - rect_pos[1]
+            distance = math.sqrt(dx*2 + dy*2)
+            
+            if distance < follow_speed:
+                current_target += 1
+                if current_target >= len(path):
+                    following = False
+                    node.publish_velocity(0, 0)  # Stop at the end of path
+            else:
+                # Calculate direction and move rectangle
+                angle = math.atan2(dy, dx)
+                rect_angle = angle  # Update rectangle angle
+                
+                move_x = follow_speed * math.cos(angle)
+                move_y = follow_speed * math.sin(angle)
+                
+                rect_pos[0] += move_x
+                rect_pos[1] += move_y
+                
+                # Calculate linear and angular velocities for ROS2
+                linear_x = follow_speed / 10.0  # Scale down for robot
+                
+                # Calculate angular velocity (difference in angle)
+                # Only send when there's a significant change
+                if abs(dx) > 0.01 or abs(dy) > 0.01:
+                    target_angle = math.atan2(dy, dx)
+                    angular_z = target_angle / 2  # Scale to reasonable values
+                    node.publish_velocity(linear_x, angular_z)
+
+        # Draw the rectangle with proper rotation
+        if rect_angle:
+            # Create a surface for the rectangle
+            rect_surface = pygame.Surface((rect_size * 2, rect_size), pygame.SRCALPHA)
+            pygame.draw.rect(rect_surface, GREEN, (0, 0, rect_size * 2, rect_size))
+            
+            # Add a direction indicator (small triangle)
+            pygame.draw.polygon(rect_surface, BLACK, [(rect_size*2-5, rect_size//2-5), 
+                                                     (rect_size*2, rect_size//2), 
+                                                     (rect_size*2-5, rect_size//2+5)])
+            
+            # Rotate the rectangle
+            rotated_rect = pygame.transform.rotate(rect_surface, -math.degrees(rect_angle))
+            rect_rect = rotated_rect.get_rect(center=(rect_pos[0], rect_pos[1]))
+            screen.blit(rotated_rect, rect_rect)
+        else:
+            # Draw a simple rectangle if no angle yet
+            pygame.draw.rect(screen, GREEN, (rect_pos[0]-rect_size, rect_pos[1]-rect_size//2, 
+                                           rect_size*2, rect_size))
+
+        # Instructions
+        font = pygame.font.SysFont(None, 24)
+        
+        instructions = [
+            "Left-click and drag to draw a path",
+            "Release to make the rectangle follow the path",
+            "Press 'r' to reset the path",
+            "Press 'ESC' to quit"
+        ]
+        
+        for i, instruction in enumerate(instructions):
+            text = font.render(instruction, True, BLACK)
+            screen.blit(text, (10, 10 + i * 25))
+
+        pygame.display.flip()
+        clock.tick(60)
+
+    # Clean up
+    pygame.quit()
+    node.publish_velocity(0, 0)  # Stop the robot
+    node.destroy_node()
+    rclpy.shutdown()
+
+if _name_ == '_main_':
+    main()
